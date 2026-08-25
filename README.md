@@ -1,32 +1,39 @@
-# Coalesce Quality OAuth for Go
+# quality-oauth-go
 
-The browser login (OAuth 2.0 authorization code + PKCE) and shared credential
-store that the Coalesce Quality command-line tools use against the public API.
+[![Go Reference](https://pkg.go.dev/badge/github.com/getsynq/quality-oauth-go.svg)](https://pkg.go.dev/github.com/getsynq/quality-oauth-go)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-It is one implementation, deliberately. The tools that use it — `synqctl`,
-`synq-recon`, `synq-scout`, `synqcli`, and the Google Cloud integrations — share
-a credential slot on disk, so a login with one of them authenticates the rest.
-Reimplementing any part of that per tool is what this package exists to prevent:
-three near-identical copies keyed their OAuth client registration on the API
-hostname, so whichever tool logged in first registered the client and the others
-silently reused it and overwrote its token.
+Go client authentication for the [Coalesce Quality](https://docs.synq.io) public API:
+an OAuth 2.0 authorization-code flow with PKCE, client-credentials and static-token
+support, and a credential store shared by every command-line tool on the machine.
+
+This is the authentication used by the Coalesce Quality CLIs — `synqctl`,
+`synq-recon`, `synq-scout`, `synqcli` — and by the Google Cloud integrations. Any
+tool built against the public API can use it and share their credentials: a user
+who has logged in with one tool is authenticated for the rest.
+
+## Installation
 
 ```bash
 go get github.com/getsynq/quality-oauth-go
 ```
 
-## Using it
+Requires Go 1.25 or later.
 
-An app declares who it is and what it needs. Everything else — the region's
-OAuth endpoints, the client registration, the callback server, the token
-refresh, where the credential is filed — follows from that.
+## Quick start
+
+Describe the tool once, as an `App`. Everything else follows from it: the OAuth
+endpoints for the chosen deployment, client registration, the loopback callback,
+token storage and renewal.
 
 ```go
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 
 	qualityoauth "github.com/getsynq/quality-oauth-go"
 )
@@ -34,139 +41,175 @@ import (
 var app = qualityoauth.App{
 	Name:       "my-integration",
 	SoftwareID: "my-integration",
-	Scopes:     []string{"SCOPE_ENTITY_EDIT", "SCOPE_LINEAGE_EDIT"},
+	Scopes:     []string{"SCOPE_ENTITY_READ", "SCOPE_ENTITY_EDIT"},
 }
 
 func main() {
 	ctx := context.Background()
 
-	// Where to talk to: --region / --endpoint flags, then the QUALITY_*
-	// environment, then the deployment of the last successful login.
-	target, err := qualityoauth.TargetFromEnv("us", "")
+	// Which deployment to talk to. "" for both arguments falls back to the
+	// environment, the last login, and finally the default region.
+	target, err := qualityoauth.TargetFromEnv("" /* region */, "" /* endpoint */)
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
-	// A browser login. Prints the authorization URL before opening a browser,
-	// so a headless machine still has a way through.
-	if _, err := app.Login(ctx, target); err != nil {
-		panic(err)
-	}
-
-	// Later runs need only this: a stored token is refreshed when stale, and a
-	// client-credential or pre-issued token in the environment wins over it.
+	// An access token for that deployment, from whichever credential is
+	// available. Stored tokens are renewed when stale.
 	cred, err := app.Credential(ctx, target)
-	if err != nil {
-		panic(err)
+	if errors.Is(err, qualityoauth.ErrNoCredentials) {
+		// Nothing usable on this machine: run the browser login.
+		if _, err := app.Login(ctx, target); err != nil {
+			log.Fatal(err)
+		}
+		if cred, err = app.Credential(ctx, target); err != nil {
+			log.Fatal(err)
+		}
+	} else if err != nil {
+		log.Fatal(err)
 	}
-	fmt.Println(cred.Source, cred.Token.AccessToken != "")
+
+	fmt.Println(cred.Token.AccessToken)
 }
 ```
 
-`app.Status(ctx)` reports every credential on the machine — deployment, profile,
-flow, whether it is valid, refreshable or expired, and which of the app's scopes
-are missing. That is what a `<tool> auth status` command prints.
+Send the access token as a bearer token on each API call. With gRPC:
 
-## Deployments
+```go
+conn, err := grpc.NewClient(target.Endpoint,
+	grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})),
+	grpc.WithPerRPCCredentials(bearer(cred.Token.AccessToken)),
+	grpc.WithAuthority(target.Host),
+)
+```
 
-A deployment is a region name or an explicit endpoint. Regions are listed by
-`RegionNames()` and resolved by `TargetForRegion`; every OAuth endpoint (issuer,
-authorize, token, registration) is discovered from that region's own
-`/.well-known/oauth-authorization-server` rather than derived from another
-region's URL, because the issuer differs per region.
+## Credential sources
 
-`Sources.Resolve` is the single implementation of the precedence, highest first:
+`App.Credential` resolves credentials in a fixed order. The unattended sources
+come first, so a scheduled job does not pick up a developer's interactive login:
 
-1. `--endpoint`, then `--region`
-2. `QUALITY_API_ENDPOINT`, then `QUALITY_REGION`
-3. the deployment recorded by the last successful login
-4. the default region
+1. `QUALITY_CLIENT_ID` + `QUALITY_CLIENT_SECRET` — a client-credentials pair.
+2. `QUALITY_TOKEN` — a pre-issued access token, used as given.
+3. A token from the credential store, written by a browser login. Expired tokens
+   are refreshed transparently.
 
-Recording the last login is what lets someone whose only deployment is AU never
-type `--region`. It sits below every explicit source, so it can only change an
-invocation that would otherwise have silently assumed EU.
+`ErrNoCredentials` means none of the three yielded a usable token, and the caller
+should prompt for a login.
+
+### Browser login
+
+`App.Login` runs the authorization-code flow with PKCE. It registers an OAuth
+client for the app on first use, starts a loopback callback server on one of
+`DefaultCallbackPorts`, opens a browser, and stores the resulting token.
+
+The authorization URL is logged before the browser is launched, so the flow can be
+completed by hand on a machine with no browser available.
+
+`App.Status` lists every stored credential without any network calls — deployment,
+profile, workspace, expiry, whether it can be refreshed and which of the app's
+scopes it carries. It is what a `<tool> auth status` command prints.
+`App.Logout` removes one.
 
 ## Environment variables
 
-The `QUALITY_*` names are the documented ones. Each has a `SYNQ_`-prefixed
-predecessor that is still read, because they are in existing CI configuration
-and `.env` files.
-
-| Variable | What it does |
+| Variable | Purpose |
 |---|---|
-| `QUALITY_CLIENT_ID` + `QUALITY_CLIENT_SECRET` | Client-credential pair. Unattended, and wins over a stored login. |
-| `QUALITY_TOKEN` | A pre-issued access token, used as-is. |
-| `QUALITY_API_ENDPOINT` | `host:port` of the API, overriding the region. |
-| `QUALITY_REGION` | Region name. |
-| `QUALITY_AUTH_PROFILE` | Credential slot to use instead of `shared`. |
-| `QUALITY_HOME` | Where the store lives, instead of `~/.synq`. |
+| `QUALITY_CLIENT_ID`, `QUALITY_CLIENT_SECRET` | Client-credentials pair |
+| `QUALITY_TOKEN` | Pre-issued access token |
+| `QUALITY_API_ENDPOINT` | API endpoint as `host:port`, overriding the region |
+| `QUALITY_REGION` | Deployment region name |
+| `QUALITY_AUTH_PROFILE` | Credential slot to use instead of `shared` |
+| `QUALITY_HOME` | Base directory for the store, instead of `~/.synq` |
 
-Read them through `qualityoauth.Getenv`, never `os.Getenv`, or that one setting
-stops honouring its alias.
+Each variable has a `SYNQ_`-prefixed predecessor that is still honoured for
+compatibility. Read these values with `qualityoauth.Getenv` rather than
+`os.Getenv` so the fallback applies.
 
-## Store layout
+## Choosing a deployment
+
+A `Target` is either a named region or an explicit `host:port` endpoint.
+`RegionNames` lists the regions; `TargetForRegion` and `TargetForEndpoint`
+construct targets directly.
+
+Every OAuth endpoint — issuer, authorization, token, registration — is discovered
+from the deployment's own `/.well-known/oauth-authorization-server` document
+rather than derived from another deployment's URL, because the issuer differs per
+region.
+
+`Sources.Resolve` implements the precedence, highest first:
+
+1. an explicit endpoint (typically an `--endpoint` flag)
+2. a region (`--region`)
+3. an endpoint from the tool's own configuration file
+4. `QUALITY_API_ENDPOINT`
+5. `QUALITY_REGION`
+6. the deployment of the most recent successful login
+7. `DefaultRegion`
+
+Tier 6 is why a user whose only deployment is not the default never has to pass
+`--region`: it sits below every explicit source, so it only applies where the
+default region would otherwise have been assumed silently.
+
+## Credential storage
 
 ```
-~/.synq/credentials.json                          index (convenience, not truth)
-~/.synq/oauth/<host>/clients/<app>.json           per-app client registration
-~/.synq/oauth/<host>/<profile>/token.json         standard-flow token
-~/.synq/oauth/<host>/<profile>/token-<flow>.json  alternate-flow token
+~/.synq/credentials.json                          index of known deployments
+~/.synq/oauth/<host>/clients/<app>.json           OAuth client registration, per app
+~/.synq/oauth/<host>/<profile>/token.json         access and refresh token
+~/.synq/oauth/<host>/<profile>/token-<flow>.json  token for an alternate flow
 ```
 
-- **Host partition** keeps the regions apart: a token minted for one region must
-  never be sent to another.
-- **Profile partition** is `shared` by default, so one login serves the whole
-  toolchain. `WithIsolated()` or `QUALITY_AUTH_PROFILE` gives a tool its own slot.
-- **Clients sit outside the profile, one per app.** Several tools share a token
-  slot but each stays its own OAuth client, or a second login overwrites the
-  first tool's identity and its refresh stops working. A token records the
-  `client_id` that minted it and a refresh presents *that* client.
-- **The index is a convenience.** A missing or stale entry never hides a
-  credential that is on disk; resolution reads the directory tree.
+- **Tokens are partitioned by host**, so a token minted for one region is never
+  sent to another.
+- **Profiles** separate credential slots. The default is `shared`, which is what
+  allows one login to serve every tool; `WithIsolated()` or
+  `QUALITY_AUTH_PROFILE` gives a tool its own slot.
+- **Client registrations are per app**, outside the profile. Tools sharing a
+  token slot remain distinct OAuth clients, and a stored token records the client
+  that minted it so refreshes present the right one.
+- The index is a convenience for enumeration. Credential resolution reads the
+  directory tree, so a missing or stale index entry never hides a credential.
 
-Every credential file has an advisory sibling `.lock`, held for the whole
-read-modify-write including the network call. Atomic writes alone are not enough:
-two processes both seeing a stale token would both refresh, and the second writer
-would persist a refresh token the server has already rotated away — silently
-logging the user out. In-process mutexes are layered on top, because goroutines
-in one process share a file descriptor table and the OS lock alone would not
-serialise them.
+Directories are created with mode `0700` and token files with `0600` on
+Unix-like systems. Windows has no equivalent permission bits; there the store is
+protected by the access control list of its parent directory.
+
+Every credential file is read and written under an advisory lock held for the
+whole operation, including the token refresh request. Two processes that both see
+a stale token therefore refresh in sequence rather than concurrently, which
+prevents one of them persisting a refresh token the server has already rotated.
+In-process mutexes layer on top, because goroutines in a single process share
+file descriptors and would not be serialised by the OS lock alone.
 
 ## Scopes
 
-An app declares what it needs and the login sends it as the `scope` parameter.
-Not sending it is what gives a two-permission tool a forty-permission token.
+An app declares the scopes it needs and the login requests exactly those. A login
+that requests none receives whatever the user's role permits, which is wider than
+a tool should hold.
 
-- An **empty** recorded scope set means *unknown*, not *none*. It is what a
-  credential adopted from an older store looks like; never report it as missing
-  everything.
-- Consent is incremental: a login asks for `consented ∪ needed`, so re-consenting
-  broadens a shared grant instead of narrowing it.
-- Only a **consented** set is broadened from. Scopes recovered from an access
-  token's own claims are reported as what the token carries but never
-  re-requested — the older flow sent no `scope`, so the claim is the caller's
-  whole role-derived envelope, and unioning it would put every permission on
-  every tool's consent screen permanently. A refresh inherits provenance;
-  renewing is not consenting.
-- Declaring a new scope needs nothing but a re-login. Nothing caches what was
-  once asked for, and the `scope` on a cached client registration is metadata
-  only.
+- Consent is incremental. A login for an app requesting a new scope asks for the
+  union of what has been consented to and what is needed, so re-consenting
+  broadens an existing shared grant rather than narrowing it.
+- Adding a scope to an app requires only a new login. Nothing caches the
+  previously requested set.
+- A stored token with no recorded scopes means the set is unknown, not empty.
+  `Status.CoversScopes` reports `true` for such a credential rather than
+  declaring it insufficient.
+- Scopes recovered from an access token's claims, as opposed to a recorded
+  consent, are reported but never re-requested.
 
 ## Development
 
 ```bash
 go build ./...
-go test ./...
+go test ./...        # includes a re-exec test covering the cross-process lock
+go test -race ./...
 ```
 
-`authserver_test.go` is a strict fake authorization server: it enforces PKCE,
-registered redirect URIs, single-use codes and client identity. Keep it strict —
-a permissive stub turns a client-side protocol bug into a passing test. The
-browser is stubbed by an HTTP client that follows the authorization URL and its
-redirect, which is what a real browser does; nothing inside the library itself is
-stubbed. `concurrency_test.go` re-execs the test binary to prove the file lock is
-really cross-process, because a goroutine-only test would pass while the real
-thing raced.
+Tests run against a strict in-process authorization server that enforces PKCE,
+registered redirect URIs, single-use authorization codes and client identity.
+Nothing inside the library is stubbed; the browser step is performed by an HTTP
+client that follows the authorization URL and its redirect.
 
 ## Support
 
@@ -174,4 +217,4 @@ Coalesce Quality documentation: <https://docs.synq.io>.
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE).
