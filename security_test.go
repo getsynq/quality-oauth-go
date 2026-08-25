@@ -155,10 +155,15 @@ func TestLegitimateHostsStillResolve(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, target.Validate())
 
-			// And the resolved slot really is inside the store.
-			store := qualityoauth.NewStore("/home/u/.synq")
+			// And the resolved slot really is inside the store. The prefix is
+			// composed rather than written out: a literal POSIX path passes on
+			// Linux and fails on Windows, where filepath produces backslashes,
+			// which says nothing about whether the slot escaped.
+			root := filepath.Join(string(filepath.Separator)+"home", "u", ".synq")
+			store := qualityoauth.NewStore(root)
 			path := store.TokenPath(target, qualityoauth.SharedProfile)
-			require.True(t, strings.HasPrefix(filepath.Clean(path), "/home/u/.synq/oauth/"),
+			prefix := filepath.Join(root, "oauth") + string(filepath.Separator)
+			require.True(t, strings.HasPrefix(filepath.Clean(path), prefix),
 				"token path %q escaped the store", path)
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -95,6 +96,14 @@ func TestStoreDirectoriesAreOwnerOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, store.SaveToken(target, qualityoauth.SharedProfile, &qualityoauth.Token{AccessToken: "a"}))
+
+	// Windows has no Unix mode bits, so the owner-only guarantee this test
+	// states does not exist there and Go reports 0777 for every directory. The
+	// caveat is real rather than a test artefact: on Windows the credential
+	// store is protected by the ACL its parent directory carries, not by us.
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix permission bits on Windows")
+	}
 
 	for _, dir := range []string{
 		filepath.Join(store.Root(), "oauth"),
