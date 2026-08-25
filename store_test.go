@@ -90,6 +90,21 @@ func TestStoreMissingCredentialIsNotAnError(t *testing.T) {
 	require.Empty(t, statuses)
 }
 
+// skipWithoutUnixPermissions skips a test that asserts Unix mode bits.
+//
+// Windows has none — Go reports 0777 for a directory and 0666 for a file there —
+// so the owner-only guarantee these tests state does not exist on that platform.
+// The caveat is real rather than a test artefact: on Windows the credential store
+// is protected by the ACL its parent directory carries, not by anything here.
+func skipWithoutUnixPermissions(t *testing.T) {
+	t.Helper()
+	if !hasUnixPermissions() {
+		t.Skip("no Unix permission bits on Windows")
+	}
+}
+
+func hasUnixPermissions() bool { return runtime.GOOS != "windows" }
+
 func TestStoreDirectoriesAreOwnerOnly(t *testing.T) {
 	store := qualityoauth.NewStore(t.TempDir())
 	target, err := qualityoauth.TargetForRegion("eu")
@@ -97,13 +112,7 @@ func TestStoreDirectoriesAreOwnerOnly(t *testing.T) {
 
 	require.NoError(t, store.SaveToken(target, qualityoauth.SharedProfile, &qualityoauth.Token{AccessToken: "a"}))
 
-	// Windows has no Unix mode bits, so the owner-only guarantee this test
-	// states does not exist there and Go reports 0777 for every directory. The
-	// caveat is real rather than a test artefact: on Windows the credential
-	// store is protected by the ACL its parent directory carries, not by us.
-	if runtime.GOOS == "windows" {
-		t.Skip("no Unix permission bits on Windows")
-	}
+	skipWithoutUnixPermissions(t)
 
 	for _, dir := range []string{
 		filepath.Join(store.Root(), "oauth"),

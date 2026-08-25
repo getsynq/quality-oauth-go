@@ -103,10 +103,13 @@ func (s *E2ESuite) TestLoginStoresSharedCredential() {
 	s.Equal(s.target.Endpoint, stored.Endpoint)
 
 	// Refresh tokens are long-lived bearer credentials; the file must not be
-	// group- or world-readable.
-	info, err := os.Stat(s.store.TokenPath(s.target, qualityoauth.SharedProfile))
-	s.Require().NoError(err)
-	s.Equal(os.FileMode(0o600), info.Mode().Perm())
+	// group- or world-readable. Scoped rather than skipping the test, so the rest
+	// of it still runs where Unix mode bits do not exist.
+	if hasUnixPermissions() {
+		info, err := os.Stat(s.store.TokenPath(s.target, qualityoauth.SharedProfile))
+		s.Require().NoError(err)
+		s.Equal(os.FileMode(0o600), info.Mode().Perm())
+	}
 
 	// The index records the slot so `auth status` can enumerate regions.
 	idx, err := s.store.LoadIndex()
