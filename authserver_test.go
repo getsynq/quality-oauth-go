@@ -57,6 +57,8 @@ type fakeAuthServer struct {
 	CallbackState string
 	// SuppressRefreshToken drops the refresh token from the token response.
 	SuppressRefreshToken bool
+	// CliLogin, when set, is advertised as the deployment's Coalesce login.
+	CliLogin map[string]any
 
 	// minted counts issued access tokens so each one is distinguishable; two
 	// mints a second apart would otherwise produce byte-identical JWTs and
@@ -151,7 +153,7 @@ func (s *fakeAuthServer) Close() { s.server.Close() }
 
 func (s *fakeAuthServer) handleMetadata(w http.ResponseWriter, _ *http.Request) {
 	base := s.server.URL
-	writeJSONResponse(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"issuer":                                base + "/",
 		"authorization_endpoint":                base + "/oauth2/authorize",
 		"token_endpoint":                        base + "/oauth2/token",
@@ -161,7 +163,13 @@ func (s *fakeAuthServer) handleMetadata(w http.ResponseWriter, _ *http.Request) 
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
-	})
+	}
+	s.mu.Lock()
+	if s.CliLogin != nil {
+		body["cli_login"] = s.CliLogin
+	}
+	s.mu.Unlock()
+	writeJSONResponse(w, http.StatusOK, body)
 }
 
 func (s *fakeAuthServer) handleRegister(w http.ResponseWriter, r *http.Request) {

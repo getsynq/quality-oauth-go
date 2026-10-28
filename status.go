@@ -29,6 +29,12 @@ type Status struct {
 	// Scopes the token carries, nil when they were never recorded (a
 	// legacy-migrated credential).
 	Scopes []string
+	// Issuer is the Coalesce issuer of a Coalesce login, "" otherwise.
+	Issuer string
+	// Roles and Organization are a Coalesce login's Quality roles and
+	// Coalesce organization.
+	Roles        []string
+	Organization string
 	// ExpiresAt is the access token's expiry; zero when unknown.
 	ExpiresAt time.Time
 	// Valid reports whether the access token is usable now, clock skew included.
@@ -141,19 +147,22 @@ func (s *Store) StatusForHost(host string) ([]Status, error) {
 // invisible.
 func (s *Store) statusFor(target Target, profile string, tok *Token) (Status, error) {
 	st := Status{
-		Region:      firstNonEmpty(tok.Region, target.Region),
-		Endpoint:    firstNonEmpty(tok.Endpoint, target.Endpoint),
-		Host:        target.Host,
-		Profile:     profile,
-		Flow:        target.Flow,
-		Workspace:   tok.Workspace,
-		Scopes:      tok.Scopes,
-		ExpiresAt:   tok.ExpiresAt,
-		Valid:       tok.Valid(),
-		Refreshable: tok.Refreshable(),
-		ClientID:    tok.ClientID,
-		ClientName:  tok.ClientName,
-		TokenPath:   s.TokenPath(target, profile),
+		Region:       firstNonEmpty(tok.Region, target.Region),
+		Endpoint:     firstNonEmpty(tok.Endpoint, target.Endpoint),
+		Host:         target.Host,
+		Profile:      profile,
+		Flow:         target.Flow,
+		Workspace:    tok.Workspace,
+		Scopes:       tok.Scopes,
+		Issuer:       tok.Issuer,
+		Roles:        tok.Roles,
+		Organization: tok.Organization,
+		ExpiresAt:    tok.ExpiresAt,
+		Valid:        tok.Valid(),
+		Refreshable:  tok.Refreshable(),
+		ClientID:     tok.ClientID,
+		ClientName:   tok.ClientName,
+		TokenPath:    s.TokenPath(target, profile),
 	}
 
 	if st.ClientID != "" && st.ClientName == "" {

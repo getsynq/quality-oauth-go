@@ -82,12 +82,20 @@ type Token struct {
 	// refresh must present the same client, which is not necessarily the app
 	// doing the refreshing — the shared slot is written by whichever tool
 	// logged in last.
-	ClientID   string    `json:"client_id,omitempty"`
-	ClientName string    `json:"client_name,omitempty"`
-	Region     string    `json:"region,omitempty"`
-	Endpoint   string    `json:"endpoint,omitempty"`
-	Flow       string    `json:"flow,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	ClientID   string `json:"client_id,omitempty"`
+	ClientName string `json:"client_name,omitempty"`
+	// Issuer is the Coalesce issuer a Coalesce login was minted by, and where
+	// it is refreshed; "" for a token the deployment's own server minted.
+	Issuer string `json:"issuer,omitempty"`
+	// Roles and Organization are the Quality roles and the Coalesce
+	// organization a Coalesce login's token carries. A Coalesce token records
+	// no Scopes: its `scope` claim is OIDC scopes, not Quality ones.
+	Roles        []string  `json:"roles,omitempty"`
+	Organization string    `json:"organization,omitempty"`
+	Region       string    `json:"region,omitempty"`
+	Endpoint     string    `json:"endpoint,omitempty"`
+	Flow         string    `json:"flow,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitempty"`
 }
 
 // ClientRegistration is the OAuth client a profile authenticates as: either a
