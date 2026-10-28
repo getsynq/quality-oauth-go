@@ -427,6 +427,20 @@ func (s *CoalesceSuite) TestRefreshGoesToTheCoalesceIssuerAndPersistsTheRotatedT
 	s.True(again.Token.Valid())
 }
 
+func (s *CoalesceSuite) TestRefreshWithoutTheAccountsClaimClearsTheWorkspaceAndRoles() {
+	_, err := s.login()
+	s.Require().NoError(err)
+	s.expireStoredToken()
+	s.issuer.set(func() { s.issuer.Accounts, s.issuer.Roles = nil, nil })
+
+	cred, err := s.app().Credential(s.T().Context(), s.target, s.opts()...)
+	s.Require().NoError(err)
+	s.Empty(cred.Token.Workspace)
+	s.Empty(cred.Token.Roles)
+	s.Nil(cred.Token.Scopes, "the OIDC scope claim must not be recorded as Quality scopes")
+	s.Empty(cred.MissingScopes)
+}
+
 func (s *CoalesceSuite) TestQualityLoginAfterCoalesceLoginRequestsOnlyTheAppsScopes() {
 	_, err := s.login()
 	s.Require().NoError(err)

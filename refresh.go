@@ -117,7 +117,7 @@ func (t *Token) applyClaims() {
 	if claims.Subject != "" {
 		t.Subject = claims.Subject
 	}
-	if claims.Accounts != nil {
+	if t.CoalesceLogin() || claims.Accounts != nil {
 		t.applyCoalesceClaims(claims)
 		return
 	}
