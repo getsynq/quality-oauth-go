@@ -39,6 +39,10 @@ go test -race ./...
   cannot log in against a deployment where its row is absent — and the failure is
   a login that waits for a callback rather than an error. A new tool registers
   dynamically until its row exists everywhere.
+- **A Coalesce token's `scope` claim is OIDC scopes.** Recording it as Quality
+  scopes reports every scope missing and puts `openid profile …` on the next
+  consent screen. `Token.Issuer` is what marks a Coalesce token, and it is what
+  routes its refresh away from the deployment's token endpoint.
 - **Adding a region is one entry in `regions`.** Every OAuth endpoint is
   discovered per region; none is derived from another region's URL.
 

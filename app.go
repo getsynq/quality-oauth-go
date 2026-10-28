@@ -51,6 +51,8 @@ type options struct {
 	extraScopes  []string
 	clientID     string
 	clientSecret string
+	coalesce     bool
+	organization string
 	httpClient   *http.Client
 	openBrowser  func(string) error
 	logger       *slog.Logger
@@ -104,10 +106,28 @@ func WithClientOverride(clientID, clientSecret string) Option {
 	}
 }
 
+// WithCoalesceLogin logs in with the Coalesce login the deployment advertises
+// (`cli_login` in its discovery document) instead of the deployment's own
+// authorization server. The token carries the user's Quality roles rather than
+// consented scopes, and is refreshed at the Coalesce issuer. The issuer only
+// accepts DefaultCallbackPorts, so an App overriding CallbackPorts cannot use it.
+func WithCoalesceLogin() Option { return func(o *options) { o.coalesce = true } }
+
+// WithOrganization picks the Coalesce organization a Coalesce login is for.
+// Without it the issuer asks the user to choose one.
+func WithOrganization(orgID string) Option { return func(o *options) { o.organization = orgID } }
+
+// CoalesceLoginScopes are the OIDC scopes a Coalesce login asks for;
+// offline_access is what yields a refresh token.
+var CoalesceLoginScopes = []string{"openid", "profile", "email", "offline_access"}
+
 func (a App) resolveOptions(opts []Option) (*options, error) {
 	o := &options{}
 	for _, opt := range opts {
 		opt(o)
+	}
+	if o.organization != "" && !o.coalesce {
+		return nil, errors.New("an organization applies only to a Coalesce login")
 	}
 	if o.store == nil {
 		s, err := DefaultStore()
@@ -197,6 +217,30 @@ func (a App) Login(ctx context.Context, target Target, opts ...Option) (*Token, 
 	}
 	o.logger.DebugContext(ctx, "Discovered the authorization server", "issuer", meta.Issuer, "target", target.String())
 
+	var tok *Token
+	if o.coalesce {
+		tok, err = a.coalesceLogin(ctx, o, target, meta)
+	} else {
+		tok, err = a.qualityLogin(ctx, o, target, profile, meta)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := o.store.SaveToken(target, profile, tok); err != nil {
+		return nil, err
+	}
+	// A login is also a choice of deployment: without this, someone whose only
+	// deployment is AU has to pass --region au to every later command, because
+	// nothing but the default region would be left to resolve from.
+	if err := o.store.SetDefaultTarget(target); err != nil {
+		return nil, err
+	}
+	return tok, nil
+}
+
+// qualityLogin runs the consent flow against the deployment's own
+// authorization server.
+func (a App) qualityLogin(ctx context.Context, o *options, target Target, profile string, meta *ServerMetadata) (*Token, error) {
 	scopes := a.requestedScopes(o)
 	if existing, err := o.store.LoadToken(target, profile); err != nil {
 		return nil, err
@@ -244,14 +288,67 @@ func (a App) Login(ctx context.Context, target Target, opts ...Option) (*Token, 
 		ClientName:  client.ClientName,
 	}
 	tok.applyClaims()
-	if err := o.store.SaveToken(target, profile, tok); err != nil {
+	return tok, nil
+}
+
+// coalesceLogin runs the authorization-code flow against the Coalesce issuer
+// the deployment advertises, as the advertised public client. Nothing is
+// registered or cached for the client: the deployment owns it, not this machine.
+func (a App) coalesceLogin(ctx context.Context, o *options, target Target, meta *ServerMetadata) (*Token, error) {
+	if target.Flow != "" {
+		return nil, fmt.Errorf("a Coalesce login has no %q flow", target.Flow)
+	}
+	offer := meta.CliLogin
+	if offer == nil || offer.Issuer == "" || offer.ClientID == "" {
+		return nil, fmt.Errorf("%s offers no Coalesce login", target)
+	}
+	oidc, err := DiscoverOIDC(ctx, o.httpClient, offer.Issuer)
+	if err != nil {
+		return nil, fmt.Errorf("discovering the Coalesce login at %s: %w", offer.Issuer, err)
+	}
+	clientID, clientSecret := offer.ClientID, ""
+	if o.clientID != "" {
+		clientID, clientSecret = o.clientID, o.clientSecret
+	}
+
+	listener, redirectURI, err := ListenOnCallbackPort(a.ports())
+	if err != nil {
 		return nil, err
 	}
-	// A login is also a choice of deployment: without this, someone whose only
-	// deployment is AU has to pass --region au to every later command, because
-	// nothing but the default region would be left to resolve from.
-	if err := o.store.SetDefaultTarget(target); err != nil {
+	result, err := RunAuthorizationCodeFlow(ctx, FlowRequest{
+		Metadata:     oidc,
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Listener:     listener,
+		RedirectURI:  redirectURI,
+		Scopes:       CoalesceLoginScopes,
+		Audience:     offer.Audience,
+		Organization: o.organization,
+		OpenBrowser:  o.openBrowser,
+		Logger:       o.logger,
+		HTTPClient:   o.httpClient,
+	})
+	if err != nil {
 		return nil, err
+	}
+
+	tok := &Token{
+		AccessToken:  result.AccessToken,
+		RefreshToken: result.RefreshToken,
+		TokenType:    result.TokenType,
+		ExpiresAt:    result.ExpiresAt,
+		ClientID:     clientID,
+		ClientName:   a.Name,
+		Issuer:       offer.Issuer,
+	}
+	tok.applyClaims()
+	// The deployment rejects a Coalesce token without both, so failing here
+	// beats a login that looks fine and then fails every call.
+	if tok.Workspace == "" {
+		return nil, fmt.Errorf("the Coalesce organization you logged in to has no Coalesce Quality workspace on %s", target)
+	}
+	if len(tok.Roles) == 0 {
+		return nil, fmt.Errorf("your Coalesce login grants no Coalesce Quality role in workspace %q", tok.Workspace)
 	}
 	return tok, nil
 }
@@ -455,6 +552,25 @@ func (a App) refresh(ctx context.Context, o *options, target Target, profile str
 		stale = current
 	}
 
+	var fresh *Token
+	if stale.CoalesceLogin() {
+		fresh, err = a.refreshCoalesce(ctx, o, target, profile, stale)
+	} else {
+		fresh, err = a.refreshQuality(ctx, o, target, profile, stale)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := o.store.SaveToken(target, profile, fresh); err != nil {
+		return nil, err
+	}
+	o.logger.InfoContext(ctx, "Refreshed a stored credential",
+		"profile", profile, "target", target.String(), "expires_at", fresh.ExpiresAt.Format(time.RFC3339))
+	return fresh, nil
+}
+
+// refreshQuality renews a token at the deployment's own authorization server.
+func (a App) refreshQuality(ctx context.Context, o *options, target Target, profile string, stale *Token) (*Token, error) {
 	client, err := a.refreshClient(o, target, stale)
 	if err != nil {
 		return nil, err
@@ -496,11 +612,43 @@ func (a App) refresh(ctx context.Context, o *options, target Target, profile str
 		ClientName:  firstNonEmpty(client.ClientName, stale.ClientName),
 	}
 	fresh.applyClaims()
-	if err := o.store.SaveToken(target, profile, fresh); err != nil {
-		return nil, err
+	return fresh, nil
+}
+
+// refreshCoalesce renews a Coalesce login's token at the issuer and as the
+// client that minted it: a refresh token is valid nowhere else. The issuer
+// rotates refresh tokens, so the returned one must be the one persisted.
+func (a App) refreshCoalesce(ctx context.Context, o *options, target Target, profile string, stale *Token) (*Token, error) {
+	if stale.ClientID == "" {
+		return nil, fmt.Errorf("the stored Coalesce credential for %s records no OAuth client, so it cannot be refreshed", target)
 	}
-	o.logger.InfoContext(ctx, "Refreshed a stored credential",
-		"profile", profile, "target", target.String(), "expires_at", fresh.ExpiresAt.Format(time.RFC3339))
+	oidc, err := DiscoverOIDC(ctx, o.httpClient, stale.Issuer)
+	if err != nil {
+		return nil, fmt.Errorf("discovering the Coalesce login at %s: %w", stale.Issuer, err)
+	}
+	result, err := Refresh(ctx, o.httpClient, oidc, stale.ClientID, "", stale.RefreshToken)
+	if err != nil {
+		return nil, fmt.Errorf("refreshing the %s credential for %s at %s: %w", profile, target, stale.Issuer, err)
+	}
+
+	refreshToken := result.RefreshToken
+	if refreshToken == "" {
+		refreshToken = stale.RefreshToken
+	}
+	fresh := &Token{
+		AccessToken:  result.AccessToken,
+		RefreshToken: refreshToken,
+		TokenType:    result.TokenType,
+		ExpiresAt:    result.ExpiresAt,
+		Workspace:    stale.Workspace,
+		Subject:      stale.Subject,
+		ClientID:     stale.ClientID,
+		ClientName:   stale.ClientName,
+		Issuer:       stale.Issuer,
+		Roles:        stale.Roles,
+		Organization: stale.Organization,
+	}
+	fresh.applyClaims()
 	return fresh, nil
 }
 

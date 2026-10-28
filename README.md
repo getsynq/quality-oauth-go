@@ -110,6 +110,26 @@ profile, workspace, expiry, whether it can be refreshed and which of the app's
 scopes it carries. It is what a `<tool> auth status` command prints.
 `App.Logout` removes one.
 
+### Coalesce login
+
+`WithCoalesceLogin()` logs in with a Coalesce account instead. The deployment
+advertises the login as `cli_login` (issuer, client id, audience) in its discovery
+document; `App.Login` runs the same PKCE flow against that issuer, as that client,
+requesting the OIDC scopes in `CoalesceLoginScopes` plus the advertised
+`audience`. `WithOrganization(orgID)` picks the Coalesce organization; without it
+the issuer asks the user to choose one.
+
+- **No scopes are requested or recorded.** The token's `scope` claim is OIDC
+  scopes. The Quality workspace and roles come from the `https://coalesce.io/*`
+  claims and are stored as `Token.Workspace` and `Token.Roles`, and a login whose
+  organization grants no Quality workspace or role fails instead of storing a
+  token the deployment would reject.
+- **The token goes to the same slot** as any other login, so it serves every tool.
+- **It is refreshed at its issuer**, as the client that minted it. The issuer
+  rotates refresh tokens.
+- **Nothing is registered.** The client belongs to the deployment, not the
+  machine, and only accepts `DefaultCallbackPorts`.
+
 ## Environment variables
 
 | Variable | Purpose |

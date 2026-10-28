@@ -86,6 +86,23 @@ type tokenClaims struct {
 	Workspace string   `json:"workspace"`
 	Scopes    []string `json:"scopes"`
 	Scope     string   `json:"scope"`
+
+	// The Coalesce platform claims: the per-product account (the Quality
+	// workspace under "quality") and the product-prefixed roles.
+	Issuer        string            `json:"iss"`
+	OrgID         string            `json:"org_id"`
+	Accounts      map[string]string `json:"https://coalesce.io/accounts"`
+	PlatformRoles []string          `json:"https://coalesce.io/roles"`
+}
+
+// qualityAccount is the Coalesce product key for Coalesce Quality, both in the
+// accounts claim and as the roles claim's prefix.
+const qualityAccount = "quality"
+
+// CoalesceLogin reports whether the token came from a Coalesce login, so is
+// refreshed at its issuer rather than at the deployment's own server.
+func (t *Token) CoalesceLogin() bool {
+	return t != nil && t.Issuer != ""
 }
 
 // applyClaims records the identity carried by the access token on the stored
@@ -97,11 +114,15 @@ func (t *Token) applyClaims() {
 	if err != nil || claims == nil {
 		return
 	}
-	if claims.Workspace != "" {
-		t.Workspace = claims.Workspace
-	}
 	if claims.Subject != "" {
 		t.Subject = claims.Subject
+	}
+	if claims.Accounts != nil {
+		t.applyCoalesceClaims(claims)
+		return
+	}
+	if claims.Workspace != "" {
+		t.Workspace = claims.Workspace
 	}
 	// Prefer the token's own scope claim over the requested set: it is what
 	// the server actually granted.
@@ -111,6 +132,27 @@ func (t *Token) applyClaims() {
 	}
 	if len(scopes) > 0 {
 		t.Scopes = dedupeScopes(scopes)
+	}
+}
+
+// applyCoalesceClaims records a Coalesce platform token's workspace, Quality
+// roles and organization. Its `scope` claim is OIDC scopes and is deliberately
+// not recorded: as Quality scopes it would report every scope missing.
+func (t *Token) applyCoalesceClaims(claims *tokenClaims) {
+	t.Workspace = claims.Accounts[qualityAccount]
+	var roles []string
+	for _, role := range claims.PlatformRoles {
+		if r, ok := strings.CutPrefix(role, qualityAccount+":"); ok && r != "" {
+			roles = append(roles, r)
+		}
+	}
+	t.Roles = dedupeScopes(roles)
+	t.Scopes = nil
+	if claims.OrgID != "" {
+		t.Organization = claims.OrgID
+	}
+	if t.Issuer == "" {
+		t.Issuer = claims.Issuer
 	}
 }
 

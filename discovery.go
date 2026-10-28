@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -26,7 +27,22 @@ type ServerMetadata struct {
 	ScopesSupported                   []string `json:"scopes_supported"`
 	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported"`
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
+	// CliLogin is the Coalesce platform login a deployment offers to CLIs; nil
+	// when the deployment offers none.
+	CliLogin *CliLogin `json:"cli_login,omitempty"`
 }
+
+// CliLogin is the Coalesce (OIDC) login a deployment advertises: the issuer to
+// log in against, the public native client to log in as, and the API audience
+// the access token must be minted for.
+type CliLogin struct {
+	Issuer   string `json:"issuer"`
+	ClientID string `json:"client_id"`
+	Audience string `json:"audience"`
+}
+
+// oidcDiscoveryPath is the OpenID Connect discovery path, relative to the issuer.
+const oidcDiscoveryPath = "/.well-known/openid-configuration"
 
 // discoveryTimeout bounds the metadata fetch so a login against an unreachable
 // region fails with a clear error instead of hanging.
@@ -34,10 +50,18 @@ const discoveryTimeout = 15 * time.Second
 
 // Discover fetches a target's authorization server metadata.
 func Discover(ctx context.Context, client *http.Client, t Target) (*ServerMetadata, error) {
+	return fetchMetadata(ctx, client, t.AuthServerBaseURL()+discoveryPath)
+}
+
+// DiscoverOIDC fetches an OpenID provider's metadata from its issuer URL.
+func DiscoverOIDC(ctx context.Context, client *http.Client, issuer string) (*ServerMetadata, error) {
+	return fetchMetadata(ctx, client, strings.TrimSuffix(issuer, "/")+oidcDiscoveryPath)
+}
+
+func fetchMetadata(ctx context.Context, client *http.Client, url string) (*ServerMetadata, error) {
 	ctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
 	defer cancel()
 
-	url := t.AuthServerBaseURL() + discoveryPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

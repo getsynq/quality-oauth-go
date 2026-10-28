@@ -51,6 +51,11 @@ type FlowRequest struct {
 	Scopes []string
 	// Flow is forwarded to the authorization server as the `flow` query parameter.
 	Flow string
+	// Audience and Organization are forwarded as the `audience` and
+	// `organization` parameters an OIDC provider uses to pick the API and the
+	// organization the token is minted for.
+	Audience     string
+	Organization string
 	// OpenBrowser launches the browser; nil uses OpenBrowser.
 	OpenBrowser func(string) error
 	// Logger receives progress; nil uses slog.Default().
@@ -119,6 +124,12 @@ func RunAuthorizationCodeFlow(ctx context.Context, req FlowRequest) (*FlowResult
 	}
 	if req.Flow != "" {
 		authOpts = append(authOpts, oauth2.SetAuthURLParam("flow", req.Flow))
+	}
+	if req.Audience != "" {
+		authOpts = append(authOpts, oauth2.SetAuthURLParam("audience", req.Audience))
+	}
+	if req.Organization != "" {
+		authOpts = append(authOpts, oauth2.SetAuthURLParam("organization", req.Organization))
 	}
 	authURL := cfg.AuthCodeURL(state, authOpts...)
 
